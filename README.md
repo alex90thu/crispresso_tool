@@ -1,3 +1,5 @@
+[![Chinese](https://img.shields.io/badge/Language-中文-blue)](./readme_ZH.md)
+
 # CRISPResso Async UI
 
 A small toolkit to submit CRISPResso2 analyses asynchronously via a Streamlit UI and browse results from a lightweight static portal.

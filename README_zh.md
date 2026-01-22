@@ -1,3 +1,5 @@
+**中文** | [English](./readme.md)
+
 # CRISPResso 异步平台（中文说明）
 
 基于 Streamlit 的前端与后台脚本组合，支持异步提交 CRISPResso2 任务，并通过静态门户页面浏览日志与结果。
