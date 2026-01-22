@@ -1,4 +1,4 @@
-**中文** | [English](./readme.md)
+**中文** | [English](./README.md)
 
 # CRISPResso 异步平台（中文说明）
 
