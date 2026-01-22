@@ -1,4 +1,4 @@
-[![Chinese](https://img.shields.io/badge/Language-中文-blue)](./readme_ZH.md)
+[![Chinese](https://img.shields.io/badge/Language-中文-blue)](./README_zh.md)
 
 # CRISPResso Async UI
 
