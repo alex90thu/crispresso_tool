@@ -1,0 +1,13 @@
+name: crispresso-env
+channels:
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:
+  # CRISPResso2 supports Py3.8–3.10 on bioconda; pin to a known-good version.
+  - python=3.9
+  - crispresso2>=2.2.10,<2.4
+  - pip
+  - pip:
+      - typer>=0.9
+  - streamlit>=1.30
