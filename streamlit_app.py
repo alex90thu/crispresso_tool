@@ -4,6 +4,7 @@ import time
 import sys
 from pathlib import Path
 import streamlit as st
+
 # 确保 analyze_crispresso.py 和 portal_gen.py 在同一目录
 try:
     import portal_gen
@@ -15,30 +16,40 @@ except ImportError:
 DEFAULT_OUTPUT_BASE = Path("/data/lulab_commonspace/guozehua/crispresso_out")
 CURRENT_SCRIPT_DIR = Path(__file__).parent.resolve()
 ANALYSIS_SCRIPT = CURRENT_SCRIPT_DIR / "analyze_crispresso.py"
+
+# 硬编码的可执行文件路径 (用户要求隐藏输入框)
+# 如果环境变量里找不到，请修改这里为绝对路径，例如 "/home/user/bin/CRISPResso"
+CRISPRESSO_EXECUTABLE = "CRISPResso" 
 # ===========================================
 
 st.set_page_config(page_title="CRISPResso Async UI", layout="wide")
+
+# 初始化 Session State 用于存储提交后的结果
+if 'last_job_info' not in st.session_state:
+    st.session_state['last_job_info'] = None
+
 st.title("CRISPResso 异步分析平台")
-# 假设 run.sh 里设置的端口是 8000，且服务器 IP 可访问
-# 这里为了通用性，可以用相对提示，或者让用户知道端口
-PORTAL_PORT = 8505
-# 获取当前浏览器 URL 的主机名比较困难，通常建议硬编码服务器 IP 或者提示用户使用相同 IP
+
+# 获取 Portal 端口 (假设 run.sh 里配置的是 8505)
+PORTAL_PORT = "8505"  
+portal_url = f"http://{st.session_state.get('server_ip', '202.120.41.69')}:{PORTAL_PORT}"
+
 st.markdown(f"""
 **模式**: 异步后台任务 (Fire-and-Forget)
 **数据中心**: `{DEFAULT_OUTPUT_BASE}`  
-**查看所有任务**: [点击打开任务监控门户 (http://<Server_IP>:{PORTAL_PORT})](http://202.120.41.69:{PORTAL_PORT}) 
-*(请将链接中的 0.0.0.0 替换为您服务器的实际 IP)*
+**任务监控**: [点击打开任务监控门户 (Index.html)]({portal_url}) *(需确认 run.sh 中的端口配置)*
 """)
 
-# ================= Sidebar =================
+# ================= Sidebar (精简版) =================
 with st.sidebar:
     st.header("运行参数")
-    executable = st.text_input("CRISPResso 路径", value="CRISPResso", help="建议填绝对路径，例如 /home/user/miniconda3/envs/bio/bin/CRISPResso")
-    sample_name = st.text_input("样本名称 (必填)", value="Sample_01")
+    # 已移除 executable 和 sample_name 输入框
     
+    st.info("💡 样本名称将在点击运行后弹出输入。")
     st.divider()
-    min_read_length = st.number_input("最小读长", value=0)
-    min_base_quality = st.number_input("最小质量", value=0)
+    
+    min_read_length = st.number_input("最小读长 (0=不限制)", value=0)
+    min_base_quality = st.number_input("最小质量 (0=不限制)", value=0)
     n_processes = st.number_input("CPU核心数", value=4)
 
 # ================= Main Interface =================
@@ -58,114 +69,148 @@ with col_right:
     amplicon_seq = st.text_area("扩增子序列 (5'->3')", height=150)
     guide_seq = st.text_area("sgRNA 序列", height=80)
 
-run_clicked = st.button("🚀 启动后台任务", type="primary")
+# ================= 核心逻辑函数 =================
 
-if run_clicked:
-    # --- 1. 基础校验 ---
-    errors = []
-    if not fastq_r1_path or not amplicon_seq or not guide_seq or not sample_name:
-        st.error("❌ 请填写所有必填项（R1, 样本名, 序列信息）")
-        st.stop()
-    if n_padding > 0 and not fastq_r2_path:
-        st.error("❌ 拼接模式必须提供 R2")
-        st.stop()
+def submit_job(sample_name, r1, r2, amp, guide, padding, min_len, min_qual, n_proc):
+    """实际执行提交任务的逻辑"""
     
-    # 检查 analyze_crispresso.py 是否存在
-    if not ANALYSIS_SCRIPT.exists():
-        st.error(f"❌ 找不到后台脚本: {ANALYSIS_SCRIPT}")
-        st.stop()
-
-    # --- 2. 准备独立的任务目录 ---
-    # 格式: Job_YYYYMMDD_HHMMSS_样本名
+    # 1. 准备目录
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     safe_name = "".join([c for c in sample_name if c.isalnum() or c in ('-', '_')])
-    job_folder_name = f"Job_{timestamp}_{safe_name}"
+    # 格式优化：把用户输入的名称放在前面，方便看
+    job_folder_name = f"Job_{timestamp}_{safe_name}" 
     job_dir = DEFAULT_OUTPUT_BASE / job_folder_name
     
     try:
         job_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        st.error(f"无法创建目录: {e}")
-        st.stop()
+        return False, f"无法创建目录: {e}", None
 
     log_file = job_dir / "CRISPResso_RUNNING_LOG.txt"
 
-    # --- 3. 构造 Shell 命令 ---
-    # 我们不直接调用 function，而是构造一个 shell 字符串扔给 nohup
-    
-    # 拼接参数
+    # 2. 构造命令
     cmd_parts = [
         "python", f'"{ANALYSIS_SCRIPT}"',
-        "--fastq_r1", f'"{fastq_r1_path}"',
-        "--amplicon", f'"{amplicon_seq.strip()}"',
-        "--guide", f'"{guide_seq.strip()}"',
-        "--output", f'"{job_dir}"', # 直接传入绝对路径
+        "--fastq_r1", f'"{r1}"',
+        "--amplicon", f'"{amp.strip()}"',
+        "--guide", f'"{guide.strip()}"',
+        "--output", f'"{job_dir}"',
         "--name", f'"{safe_name}"',
-        "--executable", f'"{executable}"'
+        "--executable", f'"{CRISPRESSO_EXECUTABLE}"' # 使用头部定义的常量
     ]
     
-    if fastq_r2_path:
-        cmd_parts.extend(["--fastq_r2", f'"{fastq_r2_path}"'])
-    if n_padding > 0:
-        cmd_parts.extend(["--n_padding", str(n_padding)])
-    if min_read_length > 0:
-        cmd_parts.extend(["--min_read_length", str(min_read_length)])
-    if min_base_quality > 0:
-        cmd_parts.extend(["--min_base_quality", str(min_base_quality)])
-    if n_processes > 0:
-        cmd_parts.extend(["--n_processes", str(n_processes)])
+    if r2:
+        cmd_parts.extend(["--fastq_r2", f'"{r2}"'])
+    if padding > 0:
+        cmd_parts.extend(["--n_padding", str(padding)])
+    if min_len > 0:
+        cmd_parts.extend(["--min_read_length", str(min_len)])
+    if min_qual > 0:
+        cmd_parts.extend(["--min_base_quality", str(min_qual)])
+    if n_proc > 0:
+        cmd_parts.extend(["--n_processes", str(n_proc)])
 
     full_cmd_str = " ".join(cmd_parts)
-
-    # 构造 nohup 命令: (cmd) > log 2>&1 & echo $!
-    # echo $! 用于获取 PID
     nohup_cmd = f"nohup {full_cmd_str} > {log_file} 2>&1 & echo $!"
 
-    st.info("正在提交任务...")
-    
+    # 3. 执行
     try:
-        # 执行 nohup
-        # 使用 shell=True 来支持 nohup 和重定向
         process = subprocess.Popen(nohup_cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         stdout, stderr = process.communicate()
+        pid = stdout.strip().split('\n')[-1] if stdout else "Unknown"
         
-        # stdout 的第一行应该是 PID (因为 echo $!)
-        if stdout:
-            pid = stdout.strip().split('\n')[-1]
-        else:
-            pid = "Unknown"
-
-        # --- 4. 立即更新 Portal ---
-        # 这样用户打开 index.html 就能立刻看到处于“运行中”的任务
+        # 4. 触发 Portal 刷新
         if portal_gen:
             try:
                 portal_gen.generate_portal()
-            except Exception:
+            except:
                 pass
-
-        # --- 5. 反馈结果 ---
-        st.success(f"✅ 任务已后台启动！ PID: **{pid}**")
         
-        st.markdown(f"""
-        **任务详情**:
-        - **任务ID**: `{job_folder_name}`
-        - **日志文件**: `{log_file}`
-        - **输出目录**: `{job_dir}`
-        
-        👉 **[点击这里下载/查看日志文件]** (需通过文件浏览器访问 `{log_file}`)
-        
-        请访问 **Portal 门户页面** 查看进度。您可以关闭此页面，任务不会中断。
-        """)
-        
-        # 可选：显示日志文件的前几行，确认开始运行
-        time.sleep(1) # 等1秒让日志生成
-        if log_file.exists():
-            with open(log_file, 'r') as f:
-                head = f.read(500)
-            with st.expander("查看实时日志预览 (前500字符)"):
-                st.code(head)
-
+        return True, pid, {
+            "job_id": job_folder_name,
+            "log": log_file,
+            "dir": job_dir,
+            "pid": pid,
+            "name": safe_name
+        }
     except Exception as e:
-        st.error(f"提交失败: {e}")
+        return False, str(e), None
+
+
+# ================= 模态对话框 (Dialog) =================
+@st.dialog("🏷️ 为当前任务命名")
+def name_submission_dialog():
+    st.warning("请务必输入一个清晰的样本名称，以便后续查找！")
+    
+    # 获取当前时间作为默认后缀，防止用户懒得填
+    default_val = f"Sample_{time.strftime('%H%M')}"
+    user_input_name = st.text_input("样本名称", value="", placeholder="例如: 20260122_Tomato_Mutant_1")
+    
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        if st.button("取消"):
+            st.rerun()
+            
+    with col2:
+        if st.button("✅ 确认并提交", type="primary"):
+            if not user_input_name.strip():
+                st.error("名称不能为空！")
+            else:
+                with st.spinner("正在提交后台任务..."):
+                    success, msg, info = submit_job(
+                        user_input_name, 
+                        fastq_r1_path, 
+                        fastq_r2_path, 
+                        amplicon_seq, 
+                        guide_seq, 
+                        n_padding, 
+                        min_read_length, 
+                        min_base_quality, 
+                        n_processes
+                    )
+                    
+                    if success:
+                        # 将结果存入 session_state 以便在弹窗关闭后显示
+                        st.session_state['last_job_info'] = info
+                        st.rerun() # 重新运行以关闭弹窗并显示结果
+                    else:
+                        st.error(f"提交失败: {msg}")
+
+# ================= 触发逻辑 =================
+
+# 1. 显示上次提交成功的消息 (如果存在)
+if st.session_state['last_job_info']:
+    info = st.session_state['last_job_info']
+    st.success(f"✅ 任务 **{info['name']}** 已后台启动！ PID: **{info['pid']}**")
+    st.markdown(f"""
+    - **日志文件**: `{info['log']}`
+    - **输出目录**: `{info['dir']}`
+    
+    请访问 **Portal 门户页面** 查看进度。您可以继续提交下一个任务。
+    """)
+    # 添加一个按钮清除消息
+    if st.button("开始新任务 (清除上方消息)"):
+        st.session_state['last_job_info'] = None
+        st.rerun()
+    st.divider()
+
+# 2. 准备提交按钮
+run_clicked = st.button("🚀 准备提交任务", type="primary")
+
+if run_clicked:
+    # 基础校验
+    errors = []
+    if not fastq_r1_path: errors.append("请填写 FASTQ R1 路径")
+    if not amplicon_seq: errors.append("请填写扩增子序列")
+    if not guide_seq: errors.append("请填写 gRNA 序列")
+    if n_padding > 0 and not fastq_r2_path: errors.append("拼接模式必须提供 R2")
+    if not ANALYSIS_SCRIPT.exists(): errors.append(f"找不到后台脚本: {ANALYSIS_SCRIPT}")
+
+    if errors:
+        for err in errors:
+            st.error(f"❌ {err}")
+    else:
+        # 校验通过，弹出对话框
+        name_submission_dialog()
 
 st.caption("Tasks are running in background via nohup.")
