@@ -2,8 +2,9 @@
 """
 CRISPResso Analysis Wrapper (Async Backend).
 Features:
-1. Stream-based fast PE stitching.
-2. Decoupled Portal Update (Subprocess) to prevent stale code caching.
+1. Accepts modern CRISPResso2 args (--plot_window_size, --needleman_wunsch_gap_open).
+2. Clean argument parsing.
+3. Subprocess portal update.
 """
 from __future__ import annotations
 
@@ -106,7 +107,10 @@ def build_command(
     min_read_length: int | None = None,
     min_base_quality: int | None = None,
     n_processes: int | None = None,
-    n_padding: int = 0, 
+    n_padding: int = 0,
+    # New arguments
+    plot_window_size: int | None = None,
+    gap_open: int | None = None,
 ) -> List[str]:
     """Assemble the CRISPResso command."""
     if not output_dir.exists():
@@ -114,6 +118,7 @@ def build_command(
 
     final_r1 = fastq_r1
     
+    # === Stitching Logic ===
     if n_padding > 0 and fastq_r2:
         stitch_dir = output_dir / "stitched_reads"
         stitch_dir.mkdir(parents=True, exist_ok=True)
@@ -141,12 +146,24 @@ def build_command(
         cmd += ["-r2", str(fastq_r2)]
     if sample_name:
         cmd += ["-n", sample_name]
-    if min_read_length:
-        cmd += ["--min_read_length", str(min_read_length)]
-    if min_base_quality:
-        cmd += ["--min_average_read_quality", str(min_base_quality)]
+    
+    # Warning for min_read_length
+    if min_read_length and min_read_length > 0:
+        print(f"[Warning] Argument --min_read_length {min_read_length} ignored (Not supported by CRISPResso CLI directly).")
+        
+    # Map min_base_quality to -q
+    if min_base_quality and min_base_quality > 0:
+        cmd += ["-q", str(min_base_quality)]
+        
     if n_processes:
         cmd += ["-p", str(n_processes)]
+        
+    # === New Parameters Added ===
+    if plot_window_size is not None:
+        cmd += ["--plot_window_size", str(plot_window_size)]
+        
+    if gap_open is not None:
+        cmd += ["--needleman_wunsch_gap_open", str(gap_open)]
 
     return cmd
 
@@ -179,7 +196,10 @@ def run_crispresso(args: argparse.Namespace) -> None:
             min_read_length=args.min_read_length,
             min_base_quality=args.min_base_quality,
             n_processes=args.n_processes,
-            n_padding=args.n_padding, 
+            n_padding=args.n_padding,
+            # Pass new args
+            plot_window_size=args.plot_window_size,
+            gap_open=args.needleman_wunsch_gap_open,
         )
 
         print(f"[Exec] Running command:\n{' '.join(cmd)}")
@@ -193,17 +213,12 @@ def run_crispresso(args: argparse.Namespace) -> None:
         print(f"\n[Error] Unexpected error: {e}")
         sys.exit(1)
     finally:
-        # === 关键修复: 使用 subprocess 调用 portal_gen.py ===
-        # 确保每次都从磁盘读取最新的脚本，而不是使用内存中的旧版本
+        # Update portal via subprocess
         try:
-            print("[Info] Triggering Portal update via subprocess...")
             current_dir = Path(__file__).parent.resolve()
             portal_script = current_dir / "portal_gen.py"
-            
             if portal_script.exists():
                 subprocess.run([sys.executable, str(portal_script)], check=False)
-            else:
-                print(f"[Warning] portal_gen.py not found at {portal_script}")
         except Exception as e:
             print(f"[Warning] Failed to update portal: {e}")
 
@@ -217,10 +232,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default=str(DEFAULT_OUTPUT_BASE))
     parser.add_argument("--name")
     parser.add_argument("--executable", default="CRISPResso")
+    
+    # Standard optional args
     parser.add_argument("--min_read_length", type=int)
     parser.add_argument("--min_base_quality", type=int)
     parser.add_argument("--n_processes", type=int)
     parser.add_argument("--n_padding", type=int, default=0)
+    
+    # === Added support for the required args ===
+    parser.add_argument("--plot_window_size", type=int)
+    parser.add_argument("--needleman_wunsch_gap_open", type=int)
+    
     return parser.parse_args()
 
 

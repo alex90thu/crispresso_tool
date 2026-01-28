@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Portal Generator for CRISPResso Analysis (Robust Version).
-Scans the output directory and generates an index.html dashboard.
-Auto-detects report HTML files regardless of naming convention.
+Portal Generator for CRISPResso Analysis (Grouped & Cleanable).
+Features:
+1. Groups tasks into 'Active/Success' and 'Failed/Error'.
+2. Provides copy-pasteable 'rm -rf' commands for easy cleanup.
+3. Auto-detects report HTML files.
 """
 import os
 import datetime
@@ -21,18 +23,44 @@ HTML_TEMPLATE = """
     <style>
         body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 20px; background-color: #f4f6f9; }}
         h1 {{ color: #333; }}
-        .card {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }}
+        h2 {{ margin-top: 0; }}
+        .card {{ background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 30px; }}
+        
         table {{ width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; }}
         th, td {{ text-align: left; padding: 12px; border-bottom: 1px solid #ddd; word-wrap: break-word; }}
-        th {{ background-color: #007bff; color: white; }}
+        th {{ background-color: #f8f9fa; color: #333; font-weight: 600; border-top: 2px solid #ddd; }}
         tr:hover {{ background-color: #f1f1f1; }}
+        
+        /* 状态颜色 */
         .status-running {{ color: #e67e22; font-weight: bold; }}
         .status-done {{ color: #27ae60; font-weight: bold; }}
         .status-error {{ color: #c0392b; font-weight: bold; }}
-        a {{ text-decoration: none; color: #3498db; }}
+        
+        a {{ text-decoration: none; color: #007bff; }}
         a:hover {{ text-decoration: underline; }}
+        
         .refresh-btn {{ position: absolute; top: 20px; right: 20px; padding: 10px 20px; background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; }}
-        .path-info {{ font-size: 0.85em; color: #666; font-family: monospace; }}
+        .path-info {{ font-size: 0.85em; color: #666; font-family: monospace; display: block; margin-top: 4px; }}
+        
+        /* 清理命令样式 */
+        .cmd-code {{
+            background: #fff0f0;
+            border: 1px solid #ffcccc;
+            color: #d63031;
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-family: monospace;
+            font-size: 0.85em;
+            cursor: pointer;
+            display: inline-block;
+            user-select: all; /* 点击即可全选 */
+        }}
+        .cmd-code:hover {{ background: #ffe6e6; }}
+        .cmd-hint {{ font-size: 0.8em; color: #999; margin-left: 5px; }}
+        
+        /* 分区标题颜色 */
+        .header-success {{ border-left: 5px solid #27ae60; padding-left: 10px; color: #2c3e50; }}
+        .header-error {{ border-left: 5px solid #c0392b; padding-left: 10px; color: #c0392b; }}
     </style>
     <script>
         // 每60秒自动刷新一次
@@ -41,97 +69,110 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <button class="refresh-btn" onclick="location.reload()">刷新状态</button>
+    
+    <div style="margin-bottom: 20px;">
+        <h1>🧬 CRISPResso 任务看板</h1>
+        <p style="color: #666;">数据根目录: <code>{root_dir}</code> | 更新时间: {update_time}</p>
+    </div>
+
     <div class="card">
-        <h1>🧬 CRISPResso 任务列表</h1>
-        <p><strong>数据根目录:</strong> {root_dir}</p>
-        <p><strong>最后更新时间:</strong> {update_time}</p>
-        <p>💡 提示：请确保通过 HTTP 服务 (Run.sh启动的端口) 访问此页面，否则报告中的图标可能无法显示。</p>
-        <table>
-            <thead>
-                <tr style="background: #eee;">
-                    <th style="width: 25%;">任务名称 (ID)</th>
-                    <th style="width: 15%;">提交时间</th>
-                    <th style="width: 10%;">状态</th>
-                    <th style="width: 10%;">日志</th>
-                    <th style="width: 40%;">结果报告</th>
-                </tr>
-            </thead>
-            <tbody>
-                {rows}
-            </tbody>
-        </table>
+        <h2 class="header-success">🚀 进行中 & 已完成 (Active Tasks)</h2>
+        {table_active}
+    </div>
+
+    <div class="card">
+        <h2 class="header-error">❌ 异常 & 失败记录 (Failed / Errors)</h2>
+        <p>💡 提示：点击红色的清理命令可直接全选，复制到服务器终端运行即可删除该记录。</p>
+        {table_failed}
     </div>
 </body>
 </html>
 """
 
-def get_job_status(log_file: Path):
-    """根据日志文件特征推测任务状态"""
+TABLE_HEADER_TEMPLATE = """
+<table>
+    <thead>
+        <tr>
+            <th style="width: 20%;">任务名称</th>
+            <th style="width: 15%;">提交时间</th>
+            <th style="width: 10%;">状态</th>
+            <th style="width: 10%;">日志</th>
+            <th style="width: {result_col_width};">{result_col_name}</th>
+        </tr>
+    </thead>
+    <tbody>
+        {rows}
+    </tbody>
+</table>
+"""
+
+def analyze_job_status(log_file: Path):
+    """
+    分析任务状态。
+    返回: (Status_Category, HTML_String)
+    Category: 'DONE', 'RUNNING', 'ERROR'
+    """
     if not log_file.exists():
-        return '<span class="status-error">无日志</span>'
+        return 'ERROR', '<span class="status-error">无日志 (启动失败?)</span>'
     
     try:
         # 读取日志最后几行
         with open(log_file, 'rb') as f:
             try:  # Seek to end
-                f.seek(-2048, 2) 
+                f.seek(-4096, 2) 
             except OSError: # File too small
                 f.seek(0)
             last_content = f.read().decode('utf-8', errors='ignore')
             
         if "[Status] Job Completed Successfully" in last_content:
-            return '<span class="status-done">已完成 ✅</span>'
+            return 'DONE', '<span class="status-done">已完成 ✅</span>'
         elif "Error" in last_content or "Exception" in last_content or "Traceback" in last_content:
-            return '<span class="status-error">可能报错 ❌</span>'
+            return 'ERROR', '<span class="status-error">报错 ❌</span>'
         else:
-            return '<span class="status-running">运行中 ⏳</span>'
+            return 'RUNNING', '<span class="status-running">运行中 ⏳</span>'
     except Exception:
-        return '<span class="status-running">运行中 ⏳</span>'
+        return 'ERROR', '<span class="status-error">读取异常 ❓</span>'
 
 def find_report_html(job_dir: Path):
-    """
-    智能搜索报告文件。
-    CRISPResso 的输出结构可能是:
-    1. Job/CRISPResso_on_Name/CRISPResso2_report.html (标准)
-    2. Job/CRISPResso_on_Name/CRISPResso_on_Name.html (旧版/特定设置)
-    3. Job/CRISPResso_on_Name.html (异常情况)
-    """
-    # 策略 1: 搜索所有子目录中的 html 文件
-    html_candidates = list(job_dir.rglob("*.html"))
+    """智能搜索报告文件"""
+    # 策略: 搜索所有子目录中的 html 文件
+    try:
+        html_candidates = list(job_dir.rglob("*.html"))
+    except Exception:
+        return None
     
     best_candidate = None
-    
     for html in html_candidates:
-        # 忽略 index.html (如果是门户本身)
-        if html.name == "index.html":
-            continue
-            
-        # 优先寻找名字里带 report 的
-        if "report" in html.name.lower():
-            return html
-        
-        # 其次寻找名字里带 CRISPResso_on 的
-        if "crispresso_on" in html.name.lower():
-            best_candidate = html
+        if html.name == "index.html": continue
+        if "report" in html.name.lower(): return html
+        if "crispresso_on" in html.name.lower(): best_candidate = html
             
     return best_candidate
+
+def generate_row_html(job, status_html, result_content):
+    return f"""
+        <tr>
+            <td><strong>{job['name']}</strong></td>
+            <td>{job['time']}</td>
+            <td>{status_html}</td>
+            <td><a href="./{job['name']}/CRISPResso_RUNNING_LOG.txt" target="_blank">查看日志</a></td>
+            <td>{result_content}</td>
+        </tr>
+    """
 
 def generate_portal():
     if not ROOT_DIR.exists():
         print(f"Directory {ROOT_DIR} does not exist.")
         return
 
-    # 扫描所有 Job_ 开头的子目录
+    # 1. 扫描任务
     jobs = []
     for item in ROOT_DIR.iterdir():
         if item.is_dir() and item.name.startswith("Job_"):
-            # 解析时间戳用于排序
             try:
                 # 格式: Job_YYYYMMDD_HHMMSS_SampleName
-                # 字符串排序对于 YYYYMMDD_HHMMSS 是有效的
                 sort_key = item.name 
                 parts = item.name.split('_')
-                # 简单展示: 2026-01-22 20:39
                 display_time = f"{parts[1][:4]}-{parts[1][4:6]}-{parts[1][6:]} {parts[2][:2]}:{parts[2][2:]}"
             except:
                 sort_key = item.name
@@ -144,52 +185,65 @@ def generate_portal():
                 "sort": sort_key
             })
     
-    # 按时间倒序排列 (最新的在最上面)
+    # 按时间倒序
     jobs.sort(key=lambda x: x['sort'], reverse=True)
 
-    rows_html = ""
+    rows_active = ""
+    rows_failed = ""
+    
+    count_active = 0
+    count_failed = 0
+
+    # 2. 分类处理
     for job in jobs:
         job_dir = job['path']
         log_file = job_dir / "CRISPResso_RUNNING_LOG.txt"
         
-        # === 智能查找报告 ===
-        report_file = find_report_html(job_dir)
+        status_cat, status_html = analyze_job_status(log_file)
         
-        if report_file:
-            # 计算相对路径: 从 ROOT_DIR 到 report_file
-            # 例如: ./Job_XXX/CRISPResso_on_YYY/report.html
-            rel_path = report_file.relative_to(ROOT_DIR)
-            result_link = f'<a href="./{rel_path}" target="_blank">📄 查看报告 ({report_file.name})</a>'
-            result_path_display = f'<div class="path-info">{rel_path}</div>'
+        # === 成功/进行中 组 ===
+        if status_cat in ['DONE', 'RUNNING']:
+            report_file = find_report_html(job_dir)
+            if report_file:
+                rel_path = report_file.relative_to(ROOT_DIR)
+                result_content = f'<a href="./{rel_path}" target="_blank">📄 查看报告 ({report_file.name})</a>'
+                result_content += f'<div class="path-info">{rel_path}</div>'
+            else:
+                result_content = '<span style="color:#999">等待生成...</span>'
+            
+            rows_active += generate_row_html(job, status_html, result_content)
+            count_active += 1
+            
+        # === 失败/错误 组 ===
         else:
-            result_link = '<span style="color:#999">等待生成或未找到...</span>'
-            result_path_display = ''
-        
-        status = get_job_status(log_file)
-        
-        # Log 链接
-        if log_file.exists():
-             log_link = f'<a href="./{job["name"]}/{log_file.name}" target="_blank">查看日志</a>'
-        else:
-             log_link = "-"
+            # 生成清理命令
+            clean_cmd = f"rm -rf {job_dir}"
+            result_content = f'<code class="cmd-code" title="点击全选，复制去终端运行">{clean_cmd}</code>'
+            
+            rows_failed += generate_row_html(job, status_html, result_content)
+            count_failed += 1
 
-        rows_html += f"""
-            <tr>
-                <td><strong>{job['name']}</strong></td>
-                <td>{job['time']}</td>
-                <td>{status}</td>
-                <td>{log_link}</td>
-                <td>
-                    {result_link}
-                    {result_path_display}
-                </td>
-            </tr>
-        """
+    # 3. 组装表格
+    if count_active > 0:
+        table_active = TABLE_HEADER_TEMPLATE.format(
+            result_col_width="45%", result_col_name="结果报告", rows=rows_active
+        )
+    else:
+        table_active = "<p style='padding:20px; color:#666;'>暂无活跃任务。</p>"
 
+    if count_failed > 0:
+        table_failed = TABLE_HEADER_TEMPLATE.format(
+            result_col_width="45%", result_col_name="清理命令 (Server)", rows=rows_failed
+        )
+    else:
+        table_failed = "<p style='padding:20px; color:#27ae60;'>暂无失败记录，太棒了！</p>"
+
+    # 4. 生成最终HTML
     final_html = HTML_TEMPLATE.format(
         root_dir=ROOT_DIR,
         update_time=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        rows=rows_html
+        table_active=table_active,
+        table_failed=table_failed
     )
 
     try:

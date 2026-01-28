@@ -2,12 +2,12 @@
 set -euo pipefail
 
 # Run Streamlit UI for CRISPResso and a background HTTP server for results.
-# Usage: ./run.sh [--port 8501] [--address 0.0.0.0]
+# Usage: ./run.sh [--port 8504] [--address 0.0.0.0]
 
 # --- Config ---
 STREAMLIT_PORT="8504"
-PORTAL_PORT="8505"  # 结果门户的端口
-ADDR="0.0.0.0"
+PORTAL_PORT="8505"  # 结果门户的端口，与 streamlit_app.py 中的硬编码一致
+ADDR="0.0.0.0"      # 监听所有地址
 DATA_DIR="/data/lulab_commonspace/guozehua/crispresso_out"
 PORTAL_LOG="portal_server.log"
 STREAMLIT_LOG="streamlit_app.log"
@@ -31,6 +31,7 @@ cd "$(dirname "$0")"
 
 # --- Conda Environment ---
 if command -v conda >/dev/null 2>&1; then
+  # 兼容性处理，防止 conda activate 在脚本中失败
   eval "$(conda shell.bash hook)"
   conda activate "$CONDA_ENV"
 else
@@ -61,6 +62,12 @@ fi
 # --- 2. Start Streamlit App (Background) ---
 echo "Starting Streamlit App on port ${STREAMLIT_PORT} (background)..."
 
-nohup streamlit run streamlit_app.py --server.port "$STREAMLIT_PORT" --server.address "$ADDR" > "$STREAMLIT_LOG" 2>&1 &
+# 启动 Streamlit
+nohup streamlit run streamlit_app.py \
+    --server.port "$STREAMLIT_PORT" \
+    --server.address "$ADDR" \
+    > "$STREAMLIT_LOG" 2>&1 &
+
 STREAMLIT_PID=$!
 echo "Streamlit App running at http://${ADDR}:${STREAMLIT_PORT}/ (PID: $STREAMLIT_PID)"
+echo "Logs are being written to $STREAMLIT_LOG"

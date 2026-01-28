@@ -22,8 +22,8 @@ if 'last_job_info' not in st.session_state:
 
 st.title("CRISPResso 异步分析平台")
 
-PORTAL_PORT = "8000" 
-portal_url = f"http://{st.session_state.get('server_ip', '0.0.0.0')}:{PORTAL_PORT}"
+PORTAL_PORT = "8505" 
+portal_url = f"http://{st.session_state.get('server_ip', '202.120.41.69')}:{PORTAL_PORT}"
 
 st.markdown(f"""
 **模式**: 异步后台任务 (Fire-and-Forget)
@@ -36,9 +36,17 @@ with st.sidebar:
     st.header("运行参数")
     st.info("💡 样本名称将在点击运行后弹出输入。")
     st.divider()
-    min_read_length = st.number_input("最小读长 (0=不限制)", value=0)
-    min_base_quality = st.number_input("最小质量 (0=不限制)", value=0)
+    
+    # === 基础参数 ===
+    min_read_length = st.number_input("最小读长 (0=不限制)", value=0, help="对应 -q 参数之前的预过滤，CRISPResso不一定直接支持，脚本会处理")
+    min_base_quality = st.number_input("最小质量 (0=不限制)", value=0, help="对应 -q 参数")
     n_processes = st.number_input("CPU核心数", value=4)
+    
+    st.divider()
+    # === 新增高级参数 ===
+    st.subheader("CRISPResso 高级参数")
+    plot_window_size = st.number_input("Plot Window Size", value=20, help="对应 --plot_window_size")
+    gap_open_penalty = st.number_input("Gap Open Penalty", value=-20, help="对应 --needleman_wunsch_gap_open (通常为负数)")
 
 # ================= Main Interface =================
 col_left, col_right = st.columns(2)
@@ -59,7 +67,7 @@ with col_right:
 
 # ================= 逻辑函数 =================
 
-def submit_job(sample_name, r1, r2, amp, guide, padding, min_len, min_qual, n_proc):
+def submit_job(sample_name, r1, r2, amp, guide, padding, min_len, min_qual, n_proc, plot_win, gap_open):
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     safe_name = "".join([c for c in sample_name if c.isalnum() or c in ('-', '_')])
     job_folder_name = f"Job_{timestamp}_{safe_name}" 
@@ -82,11 +90,17 @@ def submit_job(sample_name, r1, r2, amp, guide, padding, min_len, min_qual, n_pr
         "--executable", f'"{CRISPRESSO_EXECUTABLE}"'
     ]
     
+    # 基础参数
     if r2: cmd_parts.extend(["--fastq_r2", f'"{r2}"'])
     if padding > 0: cmd_parts.extend(["--n_padding", str(padding)])
     if min_len > 0: cmd_parts.extend(["--min_read_length", str(min_len)])
     if min_qual > 0: cmd_parts.extend(["--min_base_quality", str(min_qual)])
     if n_proc > 0: cmd_parts.extend(["--n_processes", str(n_proc)])
+    
+    # === 新增参数传递 ===
+    # 注意：这里传递给 analyze_crispresso.py 的参数名必须与脚本里的 argparse 定义一致
+    cmd_parts.extend(["--plot_window_size", str(plot_win)])
+    cmd_parts.extend(["--needleman_wunsch_gap_open", str(gap_open)])
 
     full_cmd_str = " ".join(cmd_parts)
     nohup_cmd = f"nohup {full_cmd_str} > {log_file} 2>&1 & echo $!"
@@ -96,7 +110,6 @@ def submit_job(sample_name, r1, r2, amp, guide, padding, min_len, min_qual, n_pr
         stdout, stderr = process.communicate()
         pid = stdout.strip().split('\n')[-1] if stdout else "Unknown"
         
-        # === 关键修复: 使用 subprocess 触发 Portal 刷新 ===
         if PORTAL_SCRIPT.exists():
             subprocess.Popen([sys.executable, str(PORTAL_SCRIPT)])
         
@@ -130,7 +143,8 @@ def name_submission_dialog():
                 with st.spinner("正在提交后台任务..."):
                     success, msg, info = submit_job(
                         user_input_name, fastq_r1_path, fastq_r2_path, amplicon_seq, guide_seq, 
-                        n_padding, min_read_length, min_base_quality, n_processes
+                        n_padding, min_read_length, min_base_quality, n_processes,
+                        plot_window_size, gap_open_penalty # 传入新增参数
                     )
                     
                     if success:
